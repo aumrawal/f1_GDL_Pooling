@@ -1,20 +1,60 @@
 """
 Training loop for F1AeroNetV2 (coarse-to-fine architecture).
 
-Key difference from V1: the forward pass requires both fine and coarse
-mesh data (edges, angles, transporters, interpolation matrix), all of
-which are precomputed and stored as graph attributes.
+Usage:
+    python -m train.trainer --config configs/f1_c2f.yaml
+
+The full pipeline: load config → load data → build model → train.
+All multi-resolution preprocessing (decimation, geometry, interpolation
+matrices) is handled by DrivAerNetV2Dataset and cached to disk.
 """
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch_geometric.loader import DataLoader
 import yaml
 import os
+import time
 
 from models.f1_net_v2 import F1AeroNetV2
 from train.losses import F1AeroLoss
+from data.drivaernet_dataset_v2 import DrivAerNetV2Dataset
+
+
+def load_datasets(cfg: dict):
+    """
+    Load train/val datasets from drivaernet_real VTP files.
+    Returns (train_loader, val_loader).
+    """
+    data_cfg = cfg['data']
+    data_root = data_cfg['data_root']
+    batch_size = cfg['training']['batch_size']
+
+    train_ds = DrivAerNetV2Dataset(
+        data_root=data_root,
+        split='train',
+        target_coarse=data_cfg.get('target_coarse', 2000),
+        rho=data_cfg.get('rho', 1.225),
+        U_inf=data_cfg.get('U_inf', 83.33),
+        cache_dir=data_cfg.get('cache_dir', None),
+    )
+    val_ds = DrivAerNetV2Dataset(
+        data_root=data_root,
+        split='val',
+        target_coarse=data_cfg.get('target_coarse', 2000),
+        rho=data_cfg.get('rho', 1.225),
+        U_inf=data_cfg.get('U_inf', 83.33),
+        cache_dir=data_cfg.get('cache_dir', None),
+    )
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    print(f"Train: {len(train_ds)} meshes ({len(train_loader)} batches)")
+    print(f"Val:   {len(val_ds)} meshes ({len(val_loader)} batches)")
+    return train_loader, val_loader
 
 
 def train_epoch(model, loader, optimizer, criterion, device,
@@ -110,7 +150,12 @@ def validate(model, loader, criterion, device):
 
 
 def train(cfg_path: str):
-    """Main training entry point."""
+    """
+    Full training pipeline: config → data → model → train loop → checkpoint.
+
+    Usage:
+        python -m train.trainer --config configs/f1_c2f.yaml
+    """
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -125,12 +170,18 @@ def train(cfg_path: str):
         device = torch.device('cpu')
         print(f"Device: {device}")
 
-    model = F1AeroNetV2.from_config(cfg).to(device)
-    print(f"Parameters: {model.count_parameters()}")
+    # Load data
+    train_loader, val_loader = load_datasets(cfg)
 
+    # Build model
+    model = F1AeroNetV2.from_config(cfg).to(device)
+    params = model.count_parameters()
+    print(f"Parameters: {params['total']:,}")
+
+    # Optimizer
     accum_steps = cfg['training'].get('accum_steps', 4)
     batch_size = cfg['training']['batch_size']
-    print(f"Batch size: {batch_size} × {accum_steps} accumulation = "
+    print(f"Batch size: {batch_size} x {accum_steps} accumulation = "
           f"{batch_size * accum_steps} effective")
 
     optimizer = Adam(
@@ -141,10 +192,41 @@ def train(cfg_path: str):
     scheduler = ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
     criterion = F1AeroLoss(**cfg.get('loss', {}))
 
-    os.makedirs(cfg['training'].get('run_dir', 'runs'), exist_ok=True)
+    run_dir = cfg['training'].get('run_dir', 'runs')
+    os.makedirs(run_dir, exist_ok=True)
 
-    print("Training loop ready. Provide DataLoaders to begin.")
-    return model, optimizer, scheduler, criterion, accum_steps
+    # Train
+    epochs = cfg['training'].get('epochs', 50)
+    grad_clip = cfg['training'].get('grad_clip', 1.0)
+    best_val = float('inf')
+
+    print(f"\nStarting training for {epochs} epochs...\n")
+
+    for epoch in range(1, epochs + 1):
+        t0 = time.time()
+
+        t_loss = train_epoch(model, train_loader, optimizer, criterion,
+                             device, grad_clip=grad_clip, accum_steps=accum_steps)
+        v_loss = validate(model, val_loader, criterion, device)
+        scheduler.step(v_loss)
+
+        elapsed = time.time() - t0
+        lr_now = optimizer.param_groups[0]['lr']
+
+        marker = ''
+        if v_loss < best_val:
+            best_val = v_loss
+            torch.save(model.state_dict(), os.path.join(run_dir, 'best_v2.pt'))
+            marker = ' *'
+
+        print(f"Epoch {epoch:3d}/{epochs}  train={t_loss:.5f}  val={v_loss:.5f}  "
+              f"lr={lr_now:.1e}  {elapsed:.0f}s{marker}")
+
+    torch.save(model.state_dict(), os.path.join(run_dir, 'final_v2.pt'))
+    print(f"\nTraining complete. Best val loss: {best_val:.5f}")
+    print(f"Models saved to {run_dir}/")
+
+    return model
 
 
 if __name__ == '__main__':
