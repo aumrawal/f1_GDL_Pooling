@@ -1,0 +1,35 @@
+# Project-specific exclusions
+F1AeroNet_V2_Documentation.docx
+data/drivaernet_real/
+data/drivaernet_tiny/
+
+# Standard OS exclusions
+.DS_Store
+Thumbs.db
+
+# Python exclusions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.coveragerc
+*.log
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Distribution / packaging
+node_modules/
+dist/
+build/
+*.egg-info/

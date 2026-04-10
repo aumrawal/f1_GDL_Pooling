@@ -1,0 +1,39 @@
+# F1 Aero GEM-CNN V2: Coarse-to-Fine Configuration
+
+model:
+  in_channels: 4                    # [x, y, z, U_inf]
+  coarse_specs:                     # (multiplicity, max_irrep_order) per coarse block
+    - [16, 2]                       # 16ρ₀ ⊕ 16ρ₁ ⊕ 16ρ₂ = 80 dim
+    - [32, 2]                       # 32ρ₀ ⊕ 32ρ₁ ⊕ 32ρ₂ = 160 dim
+    - [32, 3]                       # 32ρ₀ ⊕ 32ρ₁ ⊕ 32ρ₂ ⊕ 32ρ₃ = 224 dim
+    - [64, 3]                       # widest coarse layer: 448 dim
+    - [64, 2]                       # 64ρ₀ ⊕ 64ρ₁ ⊕ 64ρ₂ = 320 dim
+    - [64, 1]                       # 64ρ₀ ⊕ 64ρ₁ = 192 dim
+  refine_specs:                     # refinement at full resolution
+    - [32, 1]                       # 32ρ₀ ⊕ 32ρ₁ = 96 dim
+    - [32, 1]                       # same — 2 refine layers
+  N_nonlin: 7                       # RegularNonlinearity sample points
+  scalar_proj_dim: 64               # symmetry-breaking projection dimension
+  head_hidden: 128
+  head_dropout: 0.1
+
+data:
+  data_root: data/drivaernet_tiny
+  target_coarse: 2000               # coarse mesh vertex count
+  max_vertices: 50000               # max fine mesh vertices
+  rho: 1.225                        # air density (kg/m³)
+  U_inf: 83.33                      # freestream velocity (m/s, ~300 km/h)
+
+training:
+  batch_size: 4
+  lr: 0.01
+  weight_decay: 1.0e-5
+  epochs: 50
+  grad_clip: 1.0
+  run_dir: runs/c2f_v2
+
+loss:
+  w_cp: 1.0
+  w_wss: 1.0
+  w_cd: 10.0
+  w_cl: 10.0
